@@ -1,0 +1,101 @@
+// License: GPL - http://www.gnu.org/licenses/gpl.html 
+// transistor (transistor distorion)
+// by daniel arena (dan@remaincalm.org)
+// http://remaincalm.org
+desc:transistor_distortion
+
+slider1:3<-24,12,1>input gain (dB)
+slider2:-96<-96,12,1>dry out (dB)
+slider3:-3<-96,12,1>wet out (dB)
+
+slider5:20<0,100,1>slew rate limit (%)
+slider6:10<0,200,1>asymmetry (%) - UGLY
+slider7:0<0,10,1>crossover deadzone (%) - UGLY
+
+@init
+// Controls quality of transformer, -> 1 == better.
+gateLevel = 0.5;
+
+@slider
+inputGain = 2 ^ (slider1 / 6);
+dryGain = 2 ^ (slider2 / 6);
+wetGain = 2 ^ (slider3 / 6); 
+
+// Slew rate limiting prevents signal from jumping too quickly
+slider5 == 0 ? (
+  slewRate = 1;
+) : (
+  slewRate = 0.1 - slider5 / 1000;
+  slewRate < 0.001 ? slewRate = 0.001;
+);
+
+// Assymetry determines multiplier for the top-half of the wave.
+slider6 == 0 ? (
+  sym = 1;
+) : (
+  sym = 1 - slider6 * 0.01;
+);
+
+// Crossover distortion simulates deadzone in transistor response
+slider7 == 0 ? (
+  xover = 0;
+) : (
+  xover = slider7 * 0.01;
+);
+
+@sample
+
+// Hard-gate without memory.
+function CrossoverDistortion(curr) (
+  ((curr > 0 && curr < xover) || (curr < 0 && curr > -xover)) ? (
+    curr *= gateLevel;
+  );
+  /* return */ curr;
+);
+
+// Limits sample "movement".
+function SlewLimit(dry) (
+  abs(this.chase - dry) > slewRate ? (
+    this.chase < dry ? (
+      this.chase += slewRate;
+    ) : (
+      this.chase -= slewRate;
+    ); 
+  ) : (
+    this.chase = dry;
+  );
+  /* return */ this.chase;
+);
+
+// Limits sample "movement".
+function Asymmetry(dry) (
+  (sym < 1) ? (
+    (dry > 0) ? (
+      wet = dry * sym;
+    );    
+  ) : (
+    wet = dry;
+  );
+  /* return */ wet;
+);
+
+// Cleans up DC component.
+function RemoveDC(dry) (
+  this.dcOut = dry + 0.999 * this.dcOut - this.dcIn;
+  this.dcIn = dry ;
+  /* return */ this.dcOut;
+);
+
+function Process(dry) (
+  wet = dry * inputGain;
+  wet = this.CrossoverDistortion(wet);
+  wet = this.Asymmetry(wet);
+  wet = this.SlewLimit(wet);
+  wet = this.removeDc(wet);  
+  
+  /* return */ wet * wetGain + dry * dryGain;
+);
+
+spl0 = left.Process(spl0);
+spl1 = right.Process(spl1);
+

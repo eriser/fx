@@ -1,0 +1,149 @@
+// License: GPL - http://www.gnu.org/licenses/gpl.html
+// floaty2 (modulated delay)
+// by daniel arena (dan@remaincalm.org)
+// http://remaincalm.org
+// 2008/09/16 - first version! contact me with bugs etc
+// 2008/09/20 - updated: less glitching on overlap, tempo sync (backward compatible)
+// 2008/10/04 - updated: L/R offset
+// 2009/10/08 - updated: fixed bug where L/R offset active with playrate != 1, tweaked clamping behaviour (default = old behaviour)
+// 2009/10/09 - updated: fixed default clamp value
+// 2013/06/23 - code cleanups
+desc: floaty2 (modulated delay)
+slider1:250<0,4000,1>delay (ms)
+slider2:40<0,100,1>mix(%)
+slider3:30<0,80,1>feedback(%)
+slider4:0.1<0,10,0.001>warp rate (Hz)
+slider5:0.5<0,4,0.1>warp amount (%)
+slider6:80<0,100,1>filter cutoff (%)
+slider7:80<0,150,1>filter resonance (%)
+slider8:1<-2,2,0.5>playback rate
+slider9:0<0,64,1>tempo sync (# 32nd notes, 0 to disable)
+slider10:98<70,100,1>L/R offset (%)
+slider11:6<-12,12,0.1>Pre-filter clamp (dB)
+
+@init
+pi = 3.141592653589793;
+prvDelaySize = -1; 
+tape.preventModulation = 1;
+clamp = 2;           // Pre-filter clamp.
+clampTarget = clamp;
+smoothOverlap = 128; // Smooth out if rec/play csr overlap.
+oneDivSmoothOverlap = 1 / smoothOverlap;
+
+@block
+(slider9 > 0 && tempo > 0) ? (
+  // Map tempo-sync to delay value.
+  slider1 = 1000 * slider9 * 60 / 8 / tempo;
+);
+
+@slider
+delaySize = (slider1 * srate / 1000) | 0;
+tape.bufsiz = delaySize * 4;
+
+// Reset delay engine if important slider values have changed.
+(delaySize != prvDelaySize ||
+ slider8 != prvSlider8 ||
+ slider4 != prvSlider4 ||
+ slider10 != prvSlider10 ) ? (
+  tape.playCsr = 0;
+  left.recCsr = delaySize - 2;
+  right.recCsr = (slider10 * left.recCsr / 100) | 0;
+  left.buf = 0;
+  right.buf = tape.bufsiz + 10;
+  tape.preventModulation = 1;
+  prvDelaySize = delaySize; 
+  prvSlider8 = slider8;
+  prvSlider4 = slider4;
+  prvSlider10 = slider10;
+);
+rate = 2 * pi * slider4 / srate;
+mix = 0.01 * slider2;
+feedback = 0.01 * slider3;
+warp = 0.01 * slider5;
+
+// RC filter params (hi/lo) - selected by magic.
+lpfC = 0.5 ^ (5 - (slider6 / 25));
+lpfR = 0.5 ^ ((slider7 / 40) - 0.6);
+hpfC = 0.5 ^ 4.8;
+hpfR = 0.5 ^ (3 - (slider7 / 40));
+oneMinusLrc = 1.0 - (lpfR * lpfC);
+oneMinusHrc = 1.0 - (hpfR * hpfC);
+
+// update clamp value
+clampTarget = 2 ^ (slider11 / 6);
+
+@sample
+
+// Advances the play head around the tape loop (w/ modulation).
+function AdvancePlayHead() (
+  tape.playCsr += (tape.preventModulation > 0) ? slider8 : (slider8 + warp * sin(t));
+  (tape.preventModulation == 0) ? t += rate;  
+
+  // Allow one full record cycle before modulation.
+  (tape.playCsr >= tape.bufsiz) ? (tape.preventModulation = 0);
+  
+  (tape.playCsr >= tape.bufsiz) ? tape.playCsr -= tape.bufsiz;
+  (tape.playCsr < 0) ? tape.playCsr += tape.bufsiz;
+  tape.playCsr0 = 0 | tape.playCsr;
+  tape.playCsr1 = (tape.playCsr0 + 1 == tape.bufsiz) ? 0 : tape.playCsr0 + 1;
+
+  // Get from play head.
+  tape.fraction = tape.playCsr - tape.playCsr0;
+);
+
+// Advances the record head around the tape loop (linear).
+function AdvanceRecHead() (
+  this.recCsr += 1;
+  (this.recCsr >= tape.bufsiz) ? this.recCsr -= tape.bufsiz;
+  (this.recCsr < 0) ? this.recCsr += tape.bufsiz;
+);
+
+// Dampen value if play/rec cursor overlap to prevent clicks.
+function FadeNearOverlap() (
+  overlapDist = abs((tape.playCsr % tape.bufsiz) - (this.recCsr % tape.bufsiz));
+  overlapMult = (overlapDist >= smoothOverlap) ? 1 : oneDivSmoothOverlap * overlapDist;
+  this.spl = (this.spl * overlapMult);
+);
+
+// Sets sample to the current value under playhead.
+function ReadFromPlayHead() (
+  this.spl = this.buf[tape.playCsr0] * (1-tape.fraction) + this.buf[tape.playCsr1] * (tape.fraction);
+);
+
+// Hard-clamps sample according to current clamp parameters.
+function HardClamp() (
+  this.spl = max(min(this.spl, clamp), -clamp);
+);
+
+// Applies a bandpass filter to the current sample.
+function BandpassFilter() (
+  // LPF
+  this.v0 = (oneMinusLrc) * this.v0 + lpfC * (this.spl - this.v1);
+  this.v1 = (oneMinusLrc) * this.v1 + lpfC * this.v0;
+  // HPF
+  this.hv0 = (oneMinusHrc) * this.hv0 + hpfC * (this.v1 - this.hv1);
+  this.hv1 = (oneMinusHrc) * this.hv1 + hpfC * this.hv0;
+  this.spl = this.v1 - this.hv1;
+);
+
+// Per-channel processing.
+function Process(curr) (
+  this.ReadFromPlayHead();
+  this.FadeNearOverlap();
+  this.HardClamp();
+  (slider6 > 0 && slider7 > 0) ? (
+    this.BandpassFilter();
+  );
+  this.buf[this.recCsr] = curr + this.spl * feedback;  // store, feedback
+  this.AdvanceRecHead();                           
+  /* return */ curr * (1 - mix) +  this.spl * mix;
+);
+
+// Main processing loop.
+(abs(clamp - clampTarget) > 0.01) ? (
+  clamp = 0.8 * clamp + 0.2 * clampTarget;
+);
+AdvancePlayHead();
+spl0 = left.Process(spl0);
+spl1 = right.Process(spl1); 
+
